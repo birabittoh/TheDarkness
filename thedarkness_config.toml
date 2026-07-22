@@ -1,0 +1,16 @@
+[functions]
+0x820DE058 = {} # prevents the game from starting
+0x8236A7E0 = {} # crashes after starting a new game
+0x82661258 = {} # crashes after starting a new game
+0x8227C710 = {} # crashes after the first elevator
+0x8279FAC8 = {} # crashes after first shootout
+
+# Injects raw mouse deltas straight into the per-frame controller poll
+# (sub_82794448), right after XamInputGetState fills the local
+# XINPUT_STATE-shaped struct and before the game reads sThumbRX/sThumbRY out
+# of it for camera-look (ACTION_LOOKAXIS). See src/hooks/camera_mouselook_hook.cpp.
+[[midasm_hook]]
+address = 0x82794464
+name = "CameraMouseLookHook"
+registers = ["r1"]
+after_instruction = true
