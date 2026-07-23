@@ -32,6 +32,7 @@
 #include <rex/system/kernel_state.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 // Direct look-velocity injection.
@@ -84,6 +85,35 @@ void PlayerLookVelocityHook(PPCRegister& r3) {
   if (!mnk->TryGetLookDelta(&dx, &dy)) {
     // MnK inactive (off / unfocused / mouse not captured): don't stomp the
     // pawn's look-velocity input -- let the normal (controller) path drive it.
+    return;
+  }
+
+  // TryGetLookDelta returns (0, 0) on every idle poll as long as MnK is
+  // enabled + focused + captured, not just when the mouse is genuinely the
+  // active input device. Writing that zero unconditionally would stomp the
+  // pawn's look-velocity fields every single frame mnk_mode is on, permanently
+  // overriding whatever the analog-stick pipeline wrote earlier this frame --
+  // i.e. enabling mouselook would silently and permanently kill stick look.
+  // Instead, only take over the fields while the mouse has moved recently:
+  // write real deltas while active, ease to a stop for a short window after
+  // the last motion (so mouse-driven turning still decelerates cleanly), then
+  // stop touching the fields entirely so the stick pipeline's own writes take
+  // effect again.
+  constexpr auto kMouseIdleReleaseWindow = std::chrono::milliseconds(200);
+  static auto last_motion_time = std::chrono::steady_clock::time_point::min();
+  static bool releasing = true;
+
+  auto now = std::chrono::steady_clock::now();
+  bool has_motion = (dx != 0 || dy != 0);
+  if (has_motion) {
+    last_motion_time = now;
+    releasing = false;
+  } else if (!releasing) {
+    if (now - last_motion_time >= kMouseIdleReleaseWindow) {
+      releasing = true;
+    }
+  } else {
+    // Already released control back to the stick pipeline; leave it alone.
     return;
   }
 
