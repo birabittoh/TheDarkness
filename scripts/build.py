@@ -167,6 +167,8 @@ def do_package(name, project_name, is_windows):
         f.write("# Keyboard controls\n")
         f.write(f'keybind_a = "E"{"\t"*5}# Interact\n')
         f.write(f'keybind_y = "Space"{"\t"*5}# Jump\n')
+        f.write(f'keybind_left_trigger = "LMB"{"\t"*5}# Left gun\n')
+        f.write(f'keybind_right_trigger = "RMB"{"\t"*5}# Right gun\n')
         f.write("\n")
         f.write("\n")
         f.write("# Danger zone\n")
