@@ -1,45 +1,77 @@
-// Mid-asm hook wiring raw mouse deltas directly into the game's own
-// controller-poll function (sub_82794448), which every frame reads a
-// per-player XINPUT_STATE-shaped struct off the stack and dispatches
-// sThumbRX/sThumbRY into the game's ACTION_LOOKAXIS handling (camera turn).
+// Camera mouselook for The Darkness (direct look-velocity injection).
 //
-// The hook fires right after the struct is filled by the XamInputGetState
-// call at 0x82794464, before the game reads sThumbRX/sThumbRY out of it, so
-// overwriting those two fields here rides mouse motion through the exact
-// same deadzone/sensitivity/autoaim-assist code path a physical stick would
-// use -- no separate emulated-controller layer, no extra frame of latency.
+// Earlier approaches wrote into the analog-stick pipeline (sub_82793FE8) and
+// could not be made to feel right -- that pipeline feeds a velocity-integration
+// camera and no value shape at that layer works. This hook instead writes the
+// mouse delta straight into the pawn's look-velocity *input* fields each frame,
+// bypassing the deadzone/response-curve/latch entirely while keeping the
+// engine's own rot-velocity easing + friction. See PlayerLookVelocityHook
+// below.
+//
+// mnk_sensitivity is read via REXCVAR_QUERY (registry-by-name), not
+// REXCVAR_GET/REXCVAR_DECLARE (direct storage_() call): mnk_input_driver.cpp
+// -- and its REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, ...) -- ends up compiled
+// into more than one linked module (this exe vs. rexruntimerd.dll), so each
+// gets its own independent FLAGS_mnk_sensitivity_storage_() static behind
+// the same registry name (see the duplicate-registration handling in
+// rexglue-sdk's cvar.cpp RegisterFlag). REXCVAR_GET here would resolve to
+// whichever copy this module linked, which is NOT necessarily the one
+// SetFlagByName (console/config) actually updates after startup, so runtime
+// sensitivity changes were silently ignored. Query() always goes through
+// the single shared registry and its currently-registered getter, so it
+// sees live changes regardless of which module's storage owns the value.
 
+#include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/input/input_system.h>
 #include <rex/input/mnk/mnk_input_driver.h>
+#include <rex/logging.h>
+#include <rex/memory/utils.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 
+#include <algorithm>
 #include <cstdint>
 
-namespace {
+// Direct look-velocity injection.
+//
+// sub_823F8AF0 is the player pawn's per-frame look-input -> rotation-velocity
+// update (pawn virtual slot +0x1C4). r3 (a1) is the pawn. At its top it reads
+// the two look-velocity *input* floats and multiplies each by 1/255
+// (0.0039215689), then eases the pawn's *applied* rot-velocity
+// (pawn+0x2294/0x2298) toward that input at dt=1/120 and calls the vtable
+// integrator that advances facing:
+//   lookvelocity_x = *(float*)(pawn + 0x227C)   (yaw input,   +/-255 range)
+//   lookvelocity_y = *(float*)(pawn + 0x2280)   (pitch input, +/-255 range)
+// (Offsets resolved from the pawn vtable accessor cluster at base 0x82081bf0:
+//  0x823fd118 = set both, 0x823fd128 = set x -> 0x227C, 0x823fd130 = set y ->
+//  0x2280.)
+//
+// By hooking sub_823F8AF0's ENTRY and overwriting those two fields with the
+// mouse delta *before* they are consumed, we win over whatever the game's own
+// analog-stick pipeline wrote earlier this frame -- so we bypass every layer
+// that made mouselook sluggish/spinny (radial + linear deadzone, log response
+// curve, sub_82793FE8's press/release latch) while keeping the engine's own
+// rot-velocity easing + friction, which is what makes turning feel smooth.
+//
+// We write an *absolute* input value each frame (not an accumulation), so the
+// raw hard-reset-per-poll delta (TryGetLookDelta) is exactly right here -- the
+// opposite of the old stick-pipeline bypass, which fed a change-triggered
+// press/release dispatch and needed a decaying accumulator. When the mouse
+// is idle TryGetLookDelta still returns true (captured + focused) with (0, 0),
+// so we write 0 and the engine eases the applied rot-velocity to a clean stop.
+// It returns false only when MnK mode is off / unfocused / uncaptured, in which
+// case we leave the field alone so a real controller still drives the pawn.
+//
+// Guest floats are big-endian; rex::memory::store_and_swap<float> writes them
+// in guest byte order.
 
-// XINPUT_GAMEPAD-shaped struct sub_82794448 reads its poll result into, at
-// r1+0x50 in guest stack terms (see var_40 in the disassembly).
-struct GuestXInputGamepad {
-  uint32_t packet_number;
-  uint16_t buttons;
-  uint8_t left_trigger;
-  uint8_t right_trigger;
-  int16_t thumb_lx;
-  int16_t thumb_ly;
-  int16_t thumb_rx;
-  int16_t thumb_ry;
-};
-static_assert(sizeof(GuestXInputGamepad) == 16);
-
-}  // namespace
-
-// [[midasm_hook]] address = 0x82794464, name = "CameraMouseLookHook",
-// registers = ["r1"], after_instruction = true
-void CameraMouseLookHook(PPCRegister& r1) {
-  auto* input = static_cast<rex::input::InputSystem*>(rex::Runtime::instance()->input_system());
+// [[midasm_hook]] address = 0x823F8AF0, name = "PlayerLookVelocityHook",
+// registers = ["r3"], after_instruction = false
+void PlayerLookVelocityHook(PPCRegister& r3) {
+  auto* input = static_cast<rex::input::InputSystem*>(
+      rex::Runtime::instance()->input_system());
   if (!input) {
     return;
   }
@@ -48,32 +80,33 @@ void CameraMouseLookHook(PPCRegister& r1) {
     return;
   }
 
-  int16_t rx = 0, ry = 0;
-  if (!mnk->TryGetLookStick(&rx, &ry)) {
+  int32_t dx = 0, dy = 0;
+  if (!mnk->TryGetLookDelta(&dx, &dy)) {
+    // MnK inactive (off / unfocused / mouse not captured): don't stomp the
+    // pawn's look-velocity input -- let the normal (controller) path drive it.
     return;
   }
-  // TryGetLookStick() reports the mouse's decayed stick value, which reads
-  // as (0, 0) whenever the mouse hasn't moved recently -- indistinguishable
-  // from "mouse centered". Since this hook runs after the real
-  // XamInputGetState poll rather than replacing it, writing that zero back
-  // would stomp a physical controller's genuine right-stick deflection every
-  // frame the mouse sits idle. Only take over the guest's stick fields when
-  // the mouse actually has look input to contribute.
-  if (rx == 0 && ry == 0) {
-    return;
-  }
+
+  // Map raw per-poll mouse pixels into the game's +/-255 look-velocity input
+  // range. kDeltaToInputScale is the coarse feel knob; fine-tune live via the
+  // mnk_sensitivity console cvar (queried by name -- see the note on
+  // REXCVAR_QUERY above).
+  constexpr double kDeltaToInputScale = 8.0;
+  double sensitivity = REXCVAR_QUERY(double, mnk_sensitivity);
+  float out_x = static_cast<float>(
+      std::clamp(dx * sensitivity * kDeltaToInputScale, -255.0, 255.0));
+  float out_y = static_cast<float>(
+      std::clamp(dy * sensitivity * kDeltaToInputScale, -255.0, 255.0));
 
   uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
-  auto* gamepad =
-      reinterpret_cast<GuestXInputGamepad*>(base + r1.u32 + 0x50);
+  uint32_t pawn = r3.u32;
+  rex::memory::store_and_swap<float>(base + pawn + 0x227C, out_x);  // yaw input
+  rex::memory::store_and_swap<float>(base + pawn + 0x2280, out_y);  // pitch input
 
-  // Guest struct is big-endian; the fields we touch are 16-bit halfwords, so
-  // a byte-swap on write is required for correctness on little-endian hosts.
-  auto to_be16 = [](int16_t v) -> int16_t {
-    uint16_t u = static_cast<uint16_t>(v);
-    return static_cast<int16_t>((u << 8) | (u >> 8));
-  };
-
-  gamepad->thumb_rx = to_be16(rx);
-  gamepad->thumb_ry = to_be16(ry);
+  static int debug_counter = 0;
+  if ((out_x != 0.0f || out_y != 0.0f) && (debug_counter++ % 5) == 0) {
+    REXLOG_INFO(
+        "PlayerLookVelocityHook: pawn={:08X} dx={} dy={} sensitivity={} out_x={:.1f} out_y={:.1f}",
+        pawn, dx, dy, sensitivity, out_x, out_y);
+  }
 }

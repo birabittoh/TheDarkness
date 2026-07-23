@@ -5,12 +5,15 @@
 0x8227C710 = {} # crashes after the first elevator
 0x8279FAC8 = {} # crashes after first shootout
 
-# Injects raw mouse deltas straight into the per-frame controller poll
-# (sub_82794448), right after XamInputGetState fills the local
-# XINPUT_STATE-shaped struct and before the game reads sThumbRX/sThumbRY out
-# of it for camera-look (ACTION_LOOKAXIS). See src/hooks/camera_mouselook_hook.cpp.
+# Direct look-velocity injection.  sub_823F8AF0 is the player pawn's
+# per-frame look-input -> rotation-velocity update (r3 = pawn).  The hook
+# overwrites the two look-velocity input floats (pawn+0x227C = yaw,
+# pawn+0x2280 = pitch, +/-255 range) with the mouse delta before they are
+# consumed, bypassing the entire analog-stick pipeline while keeping the
+# engine's own rot-velocity easing/friction.  See
+# src/hooks/camera_mouselook_hook.cpp.
 [[midasm_hook]]
-address = 0x82794464
-name = "CameraMouseLookHook"
-registers = ["r1"]
-after_instruction = true
+address = 0x823F8AF0
+name = "PlayerLookVelocityHook"
+registers = ["r3"]
+after_instruction = false
