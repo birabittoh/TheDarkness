@@ -130,15 +130,6 @@ def copy_runtime_libs(is_windows, sdk_dir, build_type):
         shutil.copy2(src, name)
 
 
-def copy_post_process_shader(dest_root):
-    src = os.path.join("resources", "shaders", SHADER_NAME)
-    dest_dir = os.path.join(dest_root, SHADER_DIR)
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, SHADER_NAME)
-    print(f"+ cp {src} {dest}")
-    shutil.copy2(src, dest)
-
-
 def post_process_shader_path(is_windows):
     sep = "\\\\" if is_windows else "/"
     return f".{sep}{SHADER_DIR}{sep}{SHADER_NAME}"
@@ -217,8 +208,6 @@ def do_package(name, project_name, is_windows):
         f.write("license_mask = 1\n")
         f.write("mnk_mode = true\n")
         f.write("mnk_capture_mouse = false\n")
-
-    copy_post_process_shader(pkg_dir)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     pkg_scripts_dir = os.path.join(pkg_dir, "scripts")
