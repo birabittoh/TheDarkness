@@ -139,6 +139,49 @@ void PlayerLookVelocityHook(PPCRegister& r3) {
   if (std::abs(vy) < kMouseDeadzone)
     vy = 0.0;
 
+  uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
+  uint32_t pawn = r3.u32;
+
+  // --- engine turn-acceleration ramp bypass (kills the input lag) ---
+  // sub_823F8AF0 does not apply our look input directly: it treats it as a
+  // *target* turn rate and rate-limits the pawn's *applied* turn rate toward
+  // that target at accel*dt per frame (per-axis max-accel constants at
+  // pawn+0x2290 yaw / pawn+0x2294 pitch, confirmed by disassembly), then
+  // integrates facing from the applied rate. That accel cap is the ramp-up /
+  // ramp-down lag that makes mouselook feel like a smoothed joystick.
+  //
+  // While we are actively driving look from the mouse, inflate those accel
+  // constants to a huge value so the engine's own "move towards" snaps the
+  // applied rate to the target in a single frame -- no ramp, instant response.
+  // The engine clamps on overshoot (fsel), so an oversized step is stable: it
+  // lands exactly on target, never past it. We save the originals and restore
+  // them the moment we hand control back to the stick pipeline, so a real
+  // controller keeps its intended ramp. Keyed on the pawn pointer so a pawn
+  // swap can never restore stale values into the wrong object.
+  constexpr uint32_t kAccelYawOff = 0x2290;
+  constexpr uint32_t kAccelPitchOff = 0x2294;
+  constexpr float kSnapAccel = 1.0e9f;
+  static uint32_t accel_saved_pawn = 0;
+  static float accel_saved_x = 0.0f;
+  static float accel_saved_y = 0.0f;
+  auto restore_accel = [&]() {
+    if (accel_saved_pawn) {
+      rex::memory::store_and_swap<float>(base + accel_saved_pawn + kAccelYawOff, accel_saved_x);
+      rex::memory::store_and_swap<float>(base + accel_saved_pawn + kAccelPitchOff, accel_saved_y);
+      accel_saved_pawn = 0;
+    }
+  };
+  auto inflate_accel = [&]() {
+    if (accel_saved_pawn != pawn) {
+      restore_accel();  // pawn changed under us -- put the previous one back first
+      accel_saved_x = rex::memory::load_and_swap<float>(base + pawn + kAccelYawOff);
+      accel_saved_y = rex::memory::load_and_swap<float>(base + pawn + kAccelPitchOff);
+      accel_saved_pawn = pawn;
+    }
+    rex::memory::store_and_swap<float>(base + pawn + kAccelYawOff, kSnapAccel);
+    rex::memory::store_and_swap<float>(base + pawn + kAccelPitchOff, kSnapAccel);
+  };
+
   bool has_motion = (vx != 0.0 || vy != 0.0);
   if (has_motion) {
     last_motion_time = now;
@@ -148,7 +191,9 @@ void PlayerLookVelocityHook(PPCRegister& r3) {
       releasing = true;
     }
   } else {
-    // Already released control back to the stick pipeline; leave it alone.
+    // Already released control back to the stick pipeline: restore the pawn's
+    // original turn-accel and leave the fields alone.
+    restore_accel();
     return;
   }
 
@@ -171,8 +216,10 @@ void PlayerLookVelocityHook(PPCRegister& r3) {
   float out_x = static_cast<float>(std::clamp(vx * scale, -255.0, 255.0));
   float out_y = static_cast<float>(std::clamp(vy * scale, -255.0, 255.0));
 
-  uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
-  uint32_t pawn = r3.u32;
+  // Snap the engine's turn-accel ramp so this input takes effect immediately
+  // (see the accel-bypass note above). Also applies while easing to zero within
+  // the release window, so the camera stops crisply instead of gliding.
+  inflate_accel();
   rex::memory::store_and_swap<float>(base + pawn + 0x227C, out_x);  // yaw input
   rex::memory::store_and_swap<float>(base + pawn + 0x2280, out_y);  // pitch input
 }
