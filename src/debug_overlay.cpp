@@ -54,6 +54,17 @@ extern "C" bool Darkness_WasNoclipRefused();
 extern "C" void Darkness_QueueGodmode();
 extern "C" bool Darkness_IsGodmodeActive();
 extern "C" bool Darkness_IsGodmodeAvailable();
+extern "C" void Darkness_QueueToggleAimAssist();
+extern "C" bool Darkness_IsAimAssistActive();
+extern "C" void Darkness_QueueCycleCamera();
+extern "C" bool Darkness_IsCycleCameraActive();
+extern "C" void Darkness_QueueToggleNightVision();
+extern "C" bool Darkness_IsNightVisionActive();
+extern "C" void Darkness_QueueDemonArm(int level);
+extern "C" void Darkness_QueueSkipCutscene();
+extern "C" void Darkness_QueueDarknessLevel(uint32_t level_index);
+extern "C" void Darkness_QueueKill();
+extern "C" void Darkness_QueueGiveAll();
 extern "C" void Darkness_ClearCharacterCandidates();
 
 // Keep in sync with the kTable order in Darkness_GetDebugCommandFn.
@@ -821,9 +832,52 @@ void DarknessDebugOverlay::OnDraw(ImGuiIO& io) {
     else
       ImGui::TextDisabled("Entity container: not observed yet");
 
-    uint32_t player = Darkness_GetPlayerCharacter();
-    ImGui::Separator();
-    if (player) {
+      ImGui::Separator();
+      ImGui::TextDisabled("Memory-toggle cheats (no guest call, safe):");
+      ImGui::Columns(2, nullptr, false);
+      bool aim = Darkness_IsAimAssistActive();
+      if (ImGui::Checkbox("Aim Assist", &aim))
+        Darkness_QueueToggleAimAssist();
+      ImGui::NextColumn();
+      bool cam = Darkness_IsCycleCameraActive();
+      if (ImGui::Checkbox("Cycle Camera", &cam))
+        Darkness_QueueCycleCamera();
+      ImGui::NextColumn();
+      bool nv = Darkness_IsNightVisionActive();
+      if (ImGui::Checkbox("Night Vision", &nv))
+        Darkness_QueueToggleNightVision();
+      ImGui::NextColumn();
+      if (ImGui::Button("Demon Arm L1", ImVec2(-1, 0)))
+        Darkness_QueueDemonArm(1);
+      ImGui::NextColumn();
+      if (ImGui::Button("Demon Arm L2", ImVec2(-1, 0)))
+        Darkness_QueueDemonArm(2);
+      ImGui::NextColumn();
+      if (ImGui::Button("Skip Cutscene", ImVec2(-1, 0)))
+        Darkness_QueueSkipCutscene();
+      ImGui::NextColumn();
+      if (ImGui::Button("Kill", ImVec2(-1, 0)))
+        Darkness_QueueKill();
+      ImGui::NextColumn();
+      if (ImGui::Button("Give All", ImVec2(-1, 0)))
+        Darkness_QueueGiveAll();
+      ImGui::Columns(1);
+
+      ImGui::Separator();
+      ImGui::TextDisabled("Darkness levels:");
+      ImGui::Columns(5, nullptr, false);
+      for (uint32_t dl = 0; dl < 5; ++dl) {
+        char label[32];
+        snprintf(label, sizeof(label), "L%d", dl + 1);
+        if (ImGui::Button(label, ImVec2(-1, 0)))
+          Darkness_QueueDarknessLevel(dl);
+        ImGui::NextColumn();
+      }
+      ImGui::Columns(1);
+
+      uint32_t player = Darkness_GetPlayerCharacter();
+      ImGui::Separator();
+      if (player) {
       uint32_t move_mode = Darkness_GetPlayerMoveMode();
       ImGui::Text("Player character: 0x%08X", player);
       ImGui::Text("Move mode: %u %s", move_mode, move_mode == 4 ? "(NOCLIP)" : "");
@@ -946,8 +1000,9 @@ void DarknessDebugOverlay::OnDraw(ImGuiIO& io) {
     }
 
     ImGui::TextWrapped(
-        "Only noclip is traced so far; godmode / giveall / kill follow the same "
-        "pattern via sub_82126828's jump table.");
+        "Memory-toggled: aim assist, cycle camera, night vision, demon arm (L1/L2), darkness L1-L5. "
+        "Guest-call: noclip, noclip2, skip cutscene, kill. "
+        "Giveall is still pending.");
     ImGui::EndTabItem();
   }
 

@@ -206,11 +206,41 @@ extern "C" void Darkness_QueueConsoleCommand(const char* text) {
 // pointers out of NPC code paths.
 REX_IMPORT(sub_8249D618, Darkness_GetEntityById, uint32_t(uint32_t, uint32_t));
 REX_IMPORT(sub_82133C58, Darkness_ToggleNoclip, uint32_t(uint32_t, uint32_t));
+REX_IMPORT(sub_82193578, Darkness_SkipInGameCutscene, uint32_t(uint32_t));
+REX_IMPORT(sub_821A8CF0, Darkness_DarknessLevelInit, uint32_t(uint32_t, uint32_t));
+REX_IMPORT(sub_82336700, Darkness_DamageInit, uint32_t(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
+REX_IMPORT(sub_82188050, Darkness_ApplyDamage, uint32_t(uint32_t, uint32_t, uint32_t));
+REX_IMPORT(sub_821F76B8, Darkness_EngineString_GetCStr, uint32_t(uint32_t));
+REX_IMPORT(sub_8218B4C0, Darkness_GiveItemByCStr, uint32_t(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
+REX_IMPORT(sub_82187A20, Darkness_GiveEntity, uint32_t(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
+REX_IMPORT(sub_8232A168, Darkness_CheckWeaponClass, uint32_t(uint32_t, uint32_t, uint32_t, uint32_t));
 
 static constexpr uint32_t kControllerPlayerObjId = 0x218;
 static constexpr uint32_t kCharacterFlagsOffset = 0x16C;
 static constexpr uint32_t kCharacterNoclipBlockedMask = 0x100000;
 static constexpr uint32_t kCharacterModeOffset = 0x1A4;
+static constexpr uint32_t kCharacterMiscFlags = 0x2B4;        // 692: misc flags
+static constexpr uint32_t kAimAssistMask = 0x800000;          // toggle aim assist bit
+static constexpr uint32_t kNVBlockedMask = 0x100000;          // night-vision blocked bit
+
+// State-block offsets (the state block is at char+0x18C).
+static constexpr uint32_t kStateBlockDirtyOffset = 0xC;       // per-field dirty flags
+static constexpr uint32_t kStateBlockDirtyCamera = 0x400;     // cycle-camera dirty bit
+static constexpr uint32_t kStateBlockToggleFlags = 0x2800;    // 10240: godmode/cycle-camera word
+static constexpr uint32_t kCycleCameraMask = 0x400000;        // cycle-camera toggle bit
+static constexpr uint32_t kStateBlockNVByte = 7709;           // night-vision toggle byte
+static constexpr uint32_t kStateBlockNVFlags = 7076;          // night-vision dirty flags word
+static constexpr uint32_t kStateBlockNVFlagsMask = 0x200;     // night-vision dirty bit
+static constexpr uint32_t kStateBlockDemonArm = 7674;         // demon-arm byte (bit 0)
+static constexpr uint32_t kStateBlockDarknessObjOffset = 7668; // darkness subobject
+static constexpr uint32_t kStateBlockDarknessMaxLevelByte = 8553; // current max darkness level
+static constexpr uint32_t kStateBlockDarknessDirtyMaskInit = 0x4000; // dirty bit for init
+static constexpr uint32_t kStateBlockDarknessCurrentByte = 7656; // current darkness level
+static constexpr uint32_t kStateBlockDarknessDirtyMaskCur = 0x100; // dirty bit for current
+// Kill/noclip check offsets
+static constexpr uint32_t kModeFieldShift = 12;
+static constexpr uint32_t kModeFieldMask = 0xF;
+static constexpr uint32_t kNoclipModeValue = 4;
 
 // Published for the overlay so it can show what was resolved rather than
 // making the user guess why a button did nothing. Refreshed once per frame on
@@ -237,6 +267,45 @@ extern "C" bool Darkness_IsNoclipBlocked() {
 extern "C" bool Darkness_WasNoclipRefused() {
   return g_noclip_refused.load(std::memory_order_acquire);
 }
+
+// --- toggleaimassistance: *(char + 0x2B4) ^= 0x800000 ---
+static std::atomic<bool> g_pending_aim_assist{false};
+static std::atomic<bool> g_aim_assist_active{false};
+extern "C" void Darkness_QueueToggleAimAssist() { g_pending_aim_assist.store(true, std::memory_order_release); }
+extern "C" bool Darkness_IsAimAssistActive() { return g_aim_assist_active.load(std::memory_order_acquire); }
+
+// --- cyclecamera: toggle bit 0x400000 at state+0x2800 ---
+static std::atomic<bool> g_pending_cycle_camera{false};
+static std::atomic<bool> g_cycle_camera_active{false};
+extern "C" void Darkness_QueueCycleCamera() { g_pending_cycle_camera.store(true, std::memory_order_release); }
+extern "C" bool Darkness_IsCycleCameraActive() { return g_cycle_camera_active.load(std::memory_order_acquire); }
+
+// --- togglenightvision: toggle byte at state+7709 + dirty flag ---
+static std::atomic<bool> g_pending_night_vision{false};
+static std::atomic<bool> g_night_vision_active{false};
+extern "C" void Darkness_QueueToggleNightVision() { g_pending_night_vision.store(true, std::memory_order_release); }
+extern "C" bool Darkness_IsNightVisionActive() { return g_night_vision_active.load(std::memory_order_acquire); }
+
+// --- givedemonarmlevel1/2: write bit 0 at state+7674 ---
+static std::atomic<int> g_pending_demon_arm{0};
+extern "C" void Darkness_QueueDemonArm(int level) { g_pending_demon_arm.store(level, std::memory_order_release); }
+
+// --- skipingamecutscene: sub_82193578(character) ---
+static std::atomic<bool> g_pending_skip_cutscene{false};
+extern "C" void Darkness_QueueSkipCutscene() { g_pending_skip_cutscene.store(true, std::memory_order_release); }
+
+// --- darkness levels: call sub_821A8CF0(state+7668, level) + memory writes ---
+// level_index is 0-4, sent as the uint32_t stored in the atomic.
+static std::atomic<uint32_t> g_pending_darkness_level{0xFFFFFFFF};
+extern "C" void Darkness_QueueDarknessLevel(uint32_t level_index) { g_pending_darkness_level.store(level_index, std::memory_order_release); }
+
+// --- kill: sub_82336700 + sub_82188050 with a 64-byte damage struct ---
+static std::atomic<bool> g_pending_kill{false};
+extern "C" void Darkness_QueueKill() { g_pending_kill.store(true, std::memory_order_release); }
+
+// --- giveall: inventory iterate + entity/weapon grants ---
+static std::atomic<bool> g_pending_giveall{false};
+extern "C" void Darkness_QueueGiveAll() { g_pending_giveall.store(true, std::memory_order_release); }
 
 // The entity container, observed rather than inferred.
 //
@@ -472,6 +541,17 @@ static uint32_t GodmodeFieldAddress(uint8_t* base, uint32_t character) {
   return state + kGodmodeFieldOffset;
 }
 
+// Returns the state-block pointer for the character, or 0 if unreachable.
+static uint32_t GetStateBlock(uint8_t* base, uint32_t character) {
+  if (!character)
+    return 0;
+  uint32_t state =
+      rex::memory::load_and_swap<uint32_t>(base + character + kCharacterStateBlockOffset);
+  if (state < 0x10000 || state >= 0xFFFF0000)
+    return 0;
+  return state;
+}
+
 // Resolves the player character from the controller and refreshes the snapshot
 // the overlay reads. Guest thread only. Returns 0 if the lookup failed (no
 // PLAYEROBJ configured yet, or the entity is not live).
@@ -515,6 +595,259 @@ static void DrainCheatQueue(uint8_t* base, uint32_t controller) {
     g_godmode_active.store((word & kGodmodeMask) != 0, std::memory_order_release);
   } else {
     g_pending_godmode.store(false, std::memory_order_release);
+  }
+
+  // --- toggleaimassistance ---
+  if (g_pending_aim_assist.exchange(false, std::memory_order_acq_rel)) {
+    if (player) {
+      uint32_t addr = player + kCharacterMiscFlags;
+      uint32_t word = rex::memory::load_and_swap<uint32_t>(base + addr);
+      word ^= kAimAssistMask;
+      rex::memory::store_and_swap<uint32_t>(base + addr, word);
+      g_aim_assist_active.store((word & kAimAssistMask) != 0, std::memory_order_release);
+      REXLOG_INFO("[cheat] aim assist toggled (0x{:08X} = 0x{:08X})", addr, word);
+    }
+  }
+
+  // --- cyclecamera ---
+  if (g_pending_cycle_camera.exchange(false, std::memory_order_acq_rel)) {
+    uint32_t state = GetStateBlock(base, player);
+    if (state) {
+      uint32_t addr = state + kStateBlockToggleFlags;
+      uint32_t word = rex::memory::load_and_swap<uint32_t>(base + addr);
+      word ^= kCycleCameraMask;
+      rex::memory::store_and_swap<uint32_t>(base + addr, word);
+      uint32_t dirty_addr = state + kStateBlockDirtyOffset;
+      uint32_t dirty = rex::memory::load_and_swap<uint32_t>(base + dirty_addr);
+      dirty |= kStateBlockDirtyCamera;
+      rex::memory::store_and_swap<uint32_t>(base + dirty_addr, dirty);
+      g_cycle_camera_active.store((word & kCycleCameraMask) != 0, std::memory_order_release);
+      REXLOG_INFO("[cheat] cycle camera toggled (0x{:08X} = 0x{:08X})", addr, word);
+    }
+  }
+
+  // --- togglenightvision ---
+  if (g_pending_night_vision.exchange(false, std::memory_order_acq_rel)) {
+    uint32_t state = GetStateBlock(base, player);
+    if (state) {
+      uint32_t nv_addr = state + kStateBlockNVByte;
+      uint8_t nv_byte = *reinterpret_cast<uint8_t*>(base + nv_addr);
+      nv_byte ^= 1;
+      *reinterpret_cast<uint8_t*>(base + nv_addr) = nv_byte;
+      // Dirty flag at state + 7076 |= 0x200
+      uint32_t fl_addr = state + kStateBlockNVFlags;
+      uint32_t flags = rex::memory::load_and_swap<uint32_t>(base + fl_addr);
+      flags |= kStateBlockNVFlagsMask;
+      rex::memory::store_and_swap<uint32_t>(base + fl_addr, flags);
+      g_night_vision_active.store(nv_byte != 0, std::memory_order_release);
+      REXLOG_INFO("[cheat] night vision toggled (state+7709 = {})", nv_byte);
+    }
+  }
+
+  // --- demon arm ---
+  int demon_level = g_pending_demon_arm.exchange(0, std::memory_order_acq_rel);
+  if (demon_level) {
+    uint32_t state = GetStateBlock(base, player);
+    if (state) {
+      uint32_t da_addr = state + kStateBlockDemonArm;
+      uint8_t da_byte = *reinterpret_cast<uint8_t*>(base + da_addr);
+      if (demon_level == 1)
+        da_byte &= ~1u;
+      else
+        da_byte |= 1;
+      *reinterpret_cast<uint8_t*>(base + da_addr) = da_byte;
+      REXLOG_INFO("[cheat] demon arm level {} (0x{:08X} = 0x{:02X})", demon_level, da_addr, da_byte);
+    }
+  }
+
+  // --- skipingamecutscene ---
+  if (g_pending_skip_cutscene.exchange(false, std::memory_order_acq_rel)) {
+    if (player) {
+      uint32_t ok = Darkness_SkipInGameCutscene(player);
+      REXLOG_INFO("[cheat] skip cutscene returned {}", ok);
+    }
+  }
+
+  // --- darkness levels ---
+  uint32_t dl_level =
+      g_pending_darkness_level.exchange(0xFFFFFFFF, std::memory_order_acq_rel);
+  if (dl_level <= 4) {
+    uint32_t state = GetStateBlock(base, player);
+    if (state) {
+      Darkness_DarknessLevelInit(state + kStateBlockDarknessObjOffset, dl_level);
+      uint8_t new_value = static_cast<uint8_t>(20 * (dl_level + 1));
+      uint8_t* max_field = reinterpret_cast<uint8_t*>(base + state + kStateBlockDarknessMaxLevelByte);
+      uint32_t* dirty_flags = reinterpret_cast<uint32_t*>(base + state + kStateBlockNVFlags);
+      if (*max_field != new_value) {
+        *max_field = new_value;
+        *dirty_flags |= kStateBlockDarknessDirtyMaskInit;
+      }
+      uint8_t* cur_field = reinterpret_cast<uint8_t*>(base + state + kStateBlockDarknessCurrentByte);
+      if (*cur_field != *max_field) {
+        *cur_field = *max_field;
+        *dirty_flags |= kStateBlockDarknessDirtyMaskCur;
+      }
+      REXLOG_INFO("[cheat] darkness level {} (state+8553 = {})", dl_level, new_value);
+    }
+  }
+
+  // --- kill ---
+  if (g_pending_kill.exchange(false, std::memory_order_acq_rel)) {
+    if (player) {
+      // Original kill guard: not in noclip and not blocked
+      uint32_t mode_field =
+          rex::memory::load_and_swap<uint32_t>(base + player + kCharacterModeOffset);
+      uint32_t flags =
+          rex::memory::load_and_swap<uint32_t>(base + player + kCharacterFlagsOffset);
+      bool in_noclip = ((mode_field >> kModeFieldShift) & kModeFieldMask) == kNoclipModeValue;
+      bool blocked = (flags & kCharacterNoclipBlockedMask) != 0;
+      if (!in_noclip && !blocked) {
+        rex::ppc::stack_guard guard;
+        uint8_t dmg_buf[64] = {};
+        uint32_t dmg_addr = rex::ppc::stack_push(dmg_buf, sizeof(dmg_buf));
+        Darkness_DamageInit(dmg_addr, 10000, 0, 0, 0, 0, 0,
+                            static_cast<uint32_t>(-1));
+        Darkness_ApplyDamage(player, dmg_addr, 0);
+        REXLOG_INFO("[cheat] kill applied to 0x{:08X}", player);
+      } else if (in_noclip) {
+        REXLOG_WARN("[cheat] kill refused: player is in noclip");
+      } else {
+        REXLOG_WARN("[cheat] kill refused: player blocked (flags & 0x100000)");
+      }
+    }
+  }
+
+  // --- giveall ---
+  if (g_pending_giveall.exchange(false, std::memory_order_acq_rel)) {
+    uint32_t state = GetStateBlock(base, player);
+    if (state && player) {
+      uint16_t slot = rex::memory::load_and_swap<uint16_t>(base + player + 368);
+      bool gave_anything = false;
+
+      // 1. Grant every item in the inventory string (state+1432 engine string)
+      uint32_t inv_eng =
+          rex::memory::load_and_swap<uint32_t>(base + state + 1432);
+      if (inv_eng) {
+        uint32_t cstr_addr = Darkness_EngineString_GetCStr(inv_eng);
+        if (cstr_addr) {
+          const char* inventory =
+              reinterpret_cast<const char*>(base + cstr_addr);
+          std::string inv_str(inventory);
+          size_t start = 0, end;
+          while ((end = inv_str.find(',', start)) != std::string::npos) {
+            if (end > start) {
+              rex::ppc::stack_guard g;
+              uint32_t token_addr = rex::ppc::stack_push_string(
+                  inv_str.substr(start, end - start).c_str());
+              Darkness_GiveItemByCStr(player, 0, 0, token_addr, slot, 0, 0);
+              gave_anything = true;
+            }
+            start = end + 1;
+          }
+          if (start < inv_str.length()) {
+            rex::ppc::stack_guard g;
+            uint32_t token_addr =
+                rex::ppc::stack_push_string(inv_str.c_str() + start);
+            Darkness_GiveItemByCStr(player, 0, 0, token_addr, slot, 0, 0);
+            gave_anything = true;
+          }
+        }
+      }
+
+      // 2. Grant all darkling types
+      static const char* kDarklingTypes[] = {
+          "ai_darkling_gunner",
+          "ai_darkling_lightkiller",
+          "ai_darkling_kamikaze",
+          "ai_darkling_berserker",
+          "ai_darkling_berserker_axe",
+          "ai_darkling_berserker_bat",
+          "ai_darkling_berserker_brokensword",
+          "ai_darkling_berserker_demolitionhammer",
+          "ai_darkling_berserker_golfdriver",
+          "ai_darkling_berserker_hammer",
+          "ai_darkling_berserker_informer",
+          "ai_darkling_berserker_katana",
+          "ai_darkling_berserker_machete",
+          "ai_darkling_berserker_pistol",
+          "ai_darkling_berserker_saw",
+      };
+      static const char* kDarklingFlags[] = {
+          "stunnable",           "waitspawn",
+          "spawndead",           "autodestroy",
+          "timeleap",            "nonpushable",
+          "nocrouch",            "noblink",
+          "alwaysvisible",       "notargeting",
+          "forcetension",        "forcedarknessmusic",
+          "air",                 "nogunkata",
+          "spawncrouched",       "nodialogueturn",
+          "muzzlevisibility",    "usednaweapons",
+          "nonightvision",       "ragdoll",
+          "nodeathsound",        "noaimassistance",
+          "noautoaim",           "autounequipweapons",
+          "dualwieldsupported",  "projectileinvulnerable",
+          "attachforcetriggers", "disableik",
+          "NoCharColl",          "NoWorldColl",
+          "NoProjectileColl",    "NoGravity",
+          "Immune",              "NoMediumMovement",
+          "Immobile",
+      };
+
+      {
+        const uint8_t kZeroObj[8] = {};
+        for (const char* dt : kDarklingTypes) {
+          rex::ppc::stack_guard g;
+          uint32_t text_addr = rex::ppc::stack_push_string(dt);
+          uint32_t eng = rex::ppc::stack_push(kZeroObj, sizeof(kZeroObj));
+          Darkness_StrFromCStr(eng, text_addr);
+          Darkness_GiveEntity(player, eng, 1, 1, slot);
+          Darkness_GiveEntity(player, eng, 1, 0, slot);
+          Darkness_StrRelease(eng);
+          gave_anything = true;
+        }
+        for (const char* df : kDarklingFlags) {
+          rex::ppc::stack_guard g;
+          uint32_t text_addr = rex::ppc::stack_push_string(df);
+          uint32_t eng = rex::ppc::stack_push(kZeroObj, sizeof(kZeroObj));
+          Darkness_StrFromCStr(eng, text_addr);
+          Darkness_GiveEntity(player, eng, 1, 1, slot);
+          Darkness_GiveEntity(player, eng, 1, 0, slot);
+          Darkness_StrRelease(eng);
+          gave_anything = true;
+        }
+      }
+
+      // 3. Ancient weapon class check
+      uint32_t wpn_container =
+          rex::memory::load_and_swap<uint32_t>(base + player + 656);
+      if (wpn_container)
+        Darkness_CheckWeaponClass(wpn_container, 7, 0, 0);
+
+      // 4. Sync darkness state
+      uint8_t* max_field =
+          reinterpret_cast<uint8_t*>(base + state + kStateBlockDarknessMaxLevelByte);
+      uint8_t* cur_field =
+          reinterpret_cast<uint8_t*>(base + state + kStateBlockDarknessCurrentByte);
+      uint32_t* dirty =
+          reinterpret_cast<uint32_t*>(base + state + kStateBlockNVFlags);
+      if (*cur_field < 100) {
+        *cur_field = 100;
+        *dirty |= kStateBlockDarknessDirtyMaskCur;
+      }
+      if (*max_field < 100) {
+        *max_field = 100;
+        *dirty |= kStateBlockDarknessDirtyMaskInit;
+      }
+      base[state + 7659] = 0;
+      base[state + 7660] = 0;
+      *dirty |= 0xA0;
+
+      if (gave_anything)
+        REXLOG_INFO("[cheat] giveall applied to 0x{:08X}", player);
+      else
+        REXLOG_WARN("[cheat] giveall: player 0x{:08X} has no inventory string",
+                    player);
+    }
   }
 
   // --- noclip ---
