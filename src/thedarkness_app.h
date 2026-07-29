@@ -8,6 +8,7 @@
 #include <rex/ui/window.h>
 
 #include "icon.generated.h"
+#include "debug_overlay.h"
 
 class ThedarknessApp : public rex::ReXApp {
  public:
@@ -23,15 +24,7 @@ class ThedarknessApp : public rex::ReXApp {
     window()->SetIcon(thedarkness::kIconPNG, thedarkness::kIconPNGSize);
   }
 
-  // Override virtual hooks for customization:
-  // void OnPostInitLogging() override {}
-  // void OnPreSetup(rex::RuntimeConfig& config) override {}
-  // void OnLoadXexImage(std::string& xex_image) override {}
-  // void OnPostLoadXexImage() override {}
-  // void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
-  // std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override;
-  // std::unique_ptr<rex::ui::AchievementNotificationDialog>
-  // CreateAchievementNotificationDialog() override;
-  // void OnShutdown() override {}
-  // void OnConfigurePaths(rex::PathConfig& paths) override {}
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    drawer->AddDialog(new rex::ui::DarknessDebugOverlay(drawer));
+  }
 };

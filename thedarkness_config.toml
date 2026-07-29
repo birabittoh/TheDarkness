@@ -17,3 +17,28 @@ address = 0x823F8AF0
 name = "PlayerLookVelocityHook"
 registers = ["r3"]
 after_instruction = false
+
+# Entity-ID -> object lookup (r3 = the entity container, r4 = entity id).
+# Observed rather than inferred: static reading of sub_824A6180 (which passes
+# its own r3 straight through to this function) suggested the controller was
+# the container, but calling it that way returned a non-guest pointer.  This
+# hook records the container the engine itself passes, so the cheat path uses
+# a known-good value.  See src/hooks/camera_mouselook_hook.cpp.
+[[midasm_hook]]
+address = 0x8249D618
+name = "EntityLookupHook"
+registers = ["r3", "r4"]
+after_instruction = false
+
+# Movement-mode switch (r3 = the character).  This is the function
+# sub_82133C58 -- the noclip toggle -- calls to do the actual work, so a
+# pointer the engine passes here is proven valid for exactly the call we want
+# to make.  Deriving the character from the entity-ID lookup instead produced
+# pointers that passed every validity check available and still crashed, so
+# the cheat path now uses only what this hook observes, matched against the
+# PLAYEROBJ id so NPCs are never picked up.
+[[midasm_hook]]
+address = 0x82132F10
+name = "MovementModeHook"
+registers = ["r3"]
+after_instruction = false

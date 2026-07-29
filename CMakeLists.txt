@@ -50,6 +50,7 @@ endif()
 # Sources
 set(THEDARKNESS_SOURCES
     src/main.cpp
+    src/debug_overlay.cpp
     src/hooks/camera_mouselook_hook.cpp
     src/xbox_live.cpp
     ${THEDARKNESS_ICON_HEADER}
