@@ -53,6 +53,7 @@ set(THEDARKNESS_SOURCES
     src/debug_overlay.cpp
     src/hooks/camera_mouselook_hook.cpp
     src/xbox_live.cpp
+    src/settings.cpp
     ${THEDARKNESS_ICON_HEADER}
 )
 
