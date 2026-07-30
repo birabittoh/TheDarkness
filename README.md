@@ -14,14 +14,7 @@ overlays, hooks) so the game runs natively and can be modded like a PC port.
 
 Using Goopie is preferable, as it makes it trivial to manage the game's assets, versions, mods, achievements, leaderboards, etc.
 
-If you still want to go the hard way, do this:
-
-1. Install Python if you don't have it already
-2. Extract the release you just downloaded
-4. Copy your legally obtained game ISO inside the release directory
-5. Run `python scripts/extract_game.py` from the release directory
-
-Finally, run the game executable to play the game.
+If you still want to go the hard way, download the [latest release](https://github.com/birabittoh/TheDarkness/releases/latest), run it and point it to the game ISO.
 
 ## Building from scratch (development)
 
