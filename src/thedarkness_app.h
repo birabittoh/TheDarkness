@@ -7,6 +7,7 @@
 #include <rex/rex_app.h>
 #include <rex/system/game_data_selector.h>
 #include <rex/ui/window.h>
+#include <rex/version.h>
 
 #include "icon.generated.h"
 #include "debug_overlay.h"
@@ -33,6 +34,7 @@ class ThedarknessApp : public rex::ReXApp {
 
   void OnPostSetup() override {
     window()->SetIcon(thedarkness::kIconPNG, thedarkness::kIconPNGSize);
+    window()->SetTitle("The Darkness " + std::string(REXGLUE_BUILD_TITLE));
   }
 
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
