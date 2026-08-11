@@ -42,3 +42,19 @@ address = 0x82132F10
 name = "MovementModeHook"
 registers = ["r3"]
 after_instruction = false
+
+# Present-queue depth cap -- the ~500ms input lag.
+#
+# 0x82867CF8 is the `cmplwi cr6, r11, 0xF` in the spin loop at the tail of
+# D3DDevice::Swap (sub_82867620), where r11 = (swaps submitted at device+0x4098)
+# - (swaps retired at device+0x40A0).  Stock Direct3D lets the CPU get 15 frames
+# ahead of the display before it blocks; a recompiled guest runs far faster than
+# the emulated GPU, so it saturates that allowance and every input lands ~15
+# frames (~0.5s at 30fps) before it is seen.  The hook rewrites r11 so the
+# untouched compare/branch trips at `d3d_max_queued_frames` (1..15, default 2)
+# instead.  See src/hooks/swap_queue_depth_hook.cpp.
+[[midasm_hook]]
+address = 0x82867CF8
+name = "SwapQueueDepthHook"
+registers = ["r11"]
+after_instruction = false

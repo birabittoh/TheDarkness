@@ -6,6 +6,7 @@
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
+#include <rex/ui/keybinds.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -232,6 +233,28 @@ struct RendererCVar {
   const char* desc;
 };
 
+// The `default` column is NOT cosmetic: this panel is write-only (see the
+// note on DrawRendererCVars), so these values are what the sliders start at
+// and what "Reset" sends -- a wrong one silently pushes a wrong value into
+// the engine. They were originally placeholders, and one of them (a guessed
+// 1.0 for xr_ppmbmaxradius, really 0.04) leaked into settings.cpp's curated
+// "Vanilla" motion-blur option and shipped as a visible blur on pawn spawn.
+//
+// They are now read out of the engine's own constructors. Each cvar's handler
+// (registered in sub_825EC690) identifies the field it writes; the value is
+// whatever initializes that field:
+//   - render settings ctor  sub_825DFF98  -- offsets are absolute
+//   - its base ctor         sub_825DFE00  -- absolute
+//   - post-process sub-block ctor sub_825DD998, instantiated at settings+528
+//     -- so a handler storing to 0x2D4 (724) reads as rel 724-528 = 196
+//   - bitfield toggles live packed in the words at +0x4A8 (1192) and +0xE4
+//     (228), whose ctor seeds are 0x44400 and 0x7B800000 respectively;
+//     `insrwi rX, r4, n, b` puts the bit(s) at mask ((1<<n)-1) << (32-b-n).
+//
+// Two entries could not be sourced this way and are still unverified guesses:
+// xr_lodscale (settings+0x4C0) and xr_shadowdecals (settings+0x180) are not
+// touched by any ctor -- they're written later from config -- so their
+// defaults below are neutral placeholders, not observed values.
 const RendererCVar kRendererCVars[] = {
     // Visualization toggles
     {"xr_showbounding", CVarKind::Toggle, 0, 0, 1, "Show bounding boxes"},
@@ -252,32 +275,32 @@ const RendererCVar kRendererCVars[] = {
     {"xr_sky", CVarKind::Toggle, 1, 0, 1, "Sky rendering"},
     {"xr_wallmarks", CVarKind::Toggle, 1, 0, 1, "Wall marks / bullet decals"},
     {"xr_shadowdecals", CVarKind::Toggle, 1, 0, 1, "Shadow decals"},
-    {"xr_stencilshadows", CVarKind::Toggle, 1, 0, 1, "Stencil shadows"},
+    {"xr_stencilshadows", CVarKind::Toggle, 0, 0, 1, "Stencil shadows"},
     {"xr_synconrender", CVarKind::Toggle, 0, 0, 1, "Sync on render"},
     {"xr_optimizedsurfaces", CVarKind::Toggle, 1, 0, 1, "Optimized surfaces"},
     // Tuning
     {"xr_lodoffset", CVarKind::Float, 0.0f, -8.0f, 8.0f, "LOD offset"},
     {"xr_lodscale", CVarKind::Float, 1.0f, 0.1f, 8.0f, "LOD scale factor"},
-    {"xr_maxportals", CVarKind::Int, 8, 0, 64, "Max portal recursion"},
-    {"xr_maxrecursion", CVarKind::Int, 4, 0, 32, "Max recursion depth"},
+    {"xr_maxportals", CVarKind::Int, 255, 0, 255, "Max portal recursion"},
+    {"xr_maxrecursion", CVarKind::Int, 255, 0, 255, "Max recursion depth"},
     {"xr_portaltexturesize", CVarKind::Int, 256, 32, 1024, "Portal texture size"},
-    {"xr_shadowdecaltexturesize", CVarKind::Int, 256, 32, 1024, "Shadow decal texture size"},
-    {"xr_shadowmapmode", CVarKind::Int, 0, 0, 4, "Shadow map mode"},
+    {"xr_shadowdecaltexturesize", CVarKind::Int, 128, 32, 1024, "Shadow decal texture size"},
+    {"xr_shadowmapmode", CVarKind::Int, 1, 0, 4, "Shadow map mode"},
     {"r_picmip", CVarKind::Int, 0, 0, 4, "Texture quality mip level (higher = blurrier)"},
-    {"xr_debugfontsize", CVarKind::Float, 1.0f, 0.25f, 4.0f, "Debug font size"},
+    {"xr_debugfontsize", CVarKind::Float, 8.0f, 1.0f, 32.0f, "Debug font size"},
     // Post-processing
     {"xr_ppglowscale", CVarKind::Float, 1.0f, 0.0f, 4.0f, "Glow scale"},
-    {"xr_ppglowbias", CVarKind::Float, 0.0f, -1.0f, 1.0f, "Glow bias"},
+    {"xr_ppglowbias", CVarKind::Float, -0.1f, -1.0f, 1.0f, "Glow bias"},
     {"xr_ppglowgamma", CVarKind::Float, 1.0f, 0.1f, 4.0f, "Glow gamma"},
-    {"xr_ppglowexp", CVarKind::Float, 1.0f, 0.1f, 8.0f, "Glow exponent"},
-    {"xr_ppexposurescale", CVarKind::Float, 1.0f, 0.0f, 4.0f, "Exposure scale"},
-    {"xr_ppexposureexp", CVarKind::Float, 1.0f, 0.1f, 8.0f, "Exposure exponent"},
+    {"xr_ppglowexp", CVarKind::Float, 2.0f, 0.1f, 8.0f, "Glow exponent"},
+    {"xr_ppexposurescale", CVarKind::Float, 0.75f, 0.0f, 4.0f, "Exposure scale"},
+    {"xr_ppexposureexp", CVarKind::Float, 1.05f, 0.1f, 8.0f, "Exposure exponent"},
     {"xr_ppexposurecontrast", CVarKind::Float, 1.0f, 0.0f, 4.0f, "Exposure contrast"},
     {"xr_ppexposuresaturation", CVarKind::Float, 1.0f, 0.0f, 4.0f, "Exposure saturation"},
     {"xr_ppexposureblacklevel", CVarKind::Float, 0.0f, 0.0f, 1.0f, "Exposure black level"},
     {"xr_pptoggledynamicexposure", CVarKind::Toggle, 1, 0, 1, "Dynamic exposure"},
     {"xr_pptoggleexposuredebug", CVarKind::Toggle, 0, 0, 1, "Exposure debug display"},
-    {"xr_ppmbmaxradius", CVarKind::Float, 1.0f, 0.0f, 8.0f, "Motion blur max radius"},
+    {"xr_ppmbmaxradius", CVarKind::Float, 0.04f, 0.0f, 1.0f, "Motion blur max radius"},
     {"xr_cc_gamma", CVarKind::Float, 1.0f, 0.1f, 4.0f, "Color correction gamma"},
     {"xr_cc_blacklevel", CVarKind::Float, 0.0f, 0.0f, 1.0f, "Color correction black level"},
 };
@@ -287,6 +310,19 @@ std::map<std::string, float>& RendererShadow() {
   static std::map<std::string, float> shadow;
   return shadow;
 }
+
+}  // namespace
+
+// Lets other systems that also drive one of kRendererCVars via the script
+// console (currently just settings.cpp's curated motion_blur cvar) keep this
+// panel's write-only shadow in sync, so it reflects the value actually sent
+// rather than going stale/reverting to the panel's own default next time
+// it's opened.
+extern "C" void Darkness_SetRendererCVarShadow(const char* name, float value) {
+  RendererShadow()[name] = value;
+}
+
+namespace {
 
 std::string FormatCall(const char* name, float value, bool as_int) {
   char buf[128];
@@ -316,9 +352,17 @@ DarknessDebugOverlay::DarknessDebugOverlay(ImGuiDrawer* imgui_drawer)
   REXLOG_INFO("Darkness debug overlay created");
   log_lines_.emplace_back("Darkness debug console. Type a script call, e.g. noclip(1).");
   log_lines_.emplace_back("Cheat commands need the cheat gate open (see Cheat Gate).");
+
+  rex::ui::RegisterBind(
+      "bind_darkness_debug_overlay", "F6", "Toggle Darkness debug overlay",
+      [this] { visible_ = !visible_; }, [this] { return visible_; },
+      "The Darkness Debug##debug");
 }
 
-DarknessDebugOverlay::~DarknessDebugOverlay() { REXLOG_INFO("Debug overlay destroyed"); }
+DarknessDebugOverlay::~DarknessDebugOverlay() {
+  rex::ui::UnregisterBind("bind_darkness_debug_overlay");
+  REXLOG_INFO("Debug overlay destroyed");
+}
 
 uint8_t* DarknessDebugOverlay::GetMembase() {
   auto* ks = rex::system::kernel_state();
@@ -579,6 +623,25 @@ void DarknessDebugOverlay::DrawHostSettings() {
         "can run systems faster than the engine expects.");
   }
 
+  // Present-queue depth. This is the input-lag knob: the game's own Direct3D
+  // spins at the end of D3DDevice::Swap only once 15 frames are in flight, and
+  // a recompiled guest outruns the emulated GPU badly enough to sit at that
+  // limit permanently (~500ms). See src/hooks/swap_queue_depth_hook.cpp.
+  int queued = CVarInt("d3d_max_queued_frames");
+  if (ImGui::SliderInt("max queued frames", &queued, 1, 15,
+                       queued >= 15 ? "%d (stock)" : "%d"))
+    SetCVarInt("d3d_max_queued_frames", queued);
+  ImGui::SameLine();
+  ImGui::TextDisabled("(?)");
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "How far the guest CPU may run ahead of the display.\n"
+        "This is the input lag: each queued frame is one frame of delay.\n"
+        "2 is a good default; 1 is the lowest latency, at some cost in\n"
+        "throughput; 15 is the game's stock allowance (~500ms).\n"
+        "Takes effect immediately.");
+  }
+
   double refresh = CVarDouble("video_mode_refresh_rate");
   float refresh_f = static_cast<float>(refresh);
   if (ImGui::SliderFloat("refresh rate (Hz)", &refresh_f, 24.0f, 240.0f, "%.0f"))
@@ -695,6 +758,9 @@ void DarknessDebugOverlay::DrawRendererCVars() {
 // ---------------------------------------------------------------------------
 
 void DarknessDebugOverlay::OnDraw(ImGuiIO& io) {
+  if (!visible_)
+    return;
+
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 500.0f, 10.0f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(480.0f, 700.0f), ImGuiCond_FirstUseEver);
 

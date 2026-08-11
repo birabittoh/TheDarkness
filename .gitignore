@@ -30,7 +30,7 @@ src/main.cpp.bak
 
 # Project version header, rewritten from the nearest git tag on every CMake
 # configure (see CMakeLists.txt)
-/src/version.generated.h
+/src/version.generated.h.in
 
 # Runtime artifacts — binary, logs, and bundled shared libraries
 /sdk/

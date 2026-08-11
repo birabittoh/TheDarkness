@@ -12,6 +12,7 @@
 
 #include <rex/cvar.h>
 #include <rex/input/input_system.h>
+#include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/platform/process.h>
 #include <rex/system/gpu_plugin.h>
@@ -23,6 +24,23 @@
 #if REX_HAS_VULKAN
 #include <rex/ui/vulkan/provider.h>
 #endif
+
+// Host-side cvar for the curated Motion Blur setting. There's no persisted
+// engine cvar for this -- xr_ppmbmaxradius is a script-VM function with no
+// by-name read path (see DrawRendererCVars's WRITE-ONLY note in
+// debug_overlay.cpp) -- so this cvar exists purely to remember the user's
+// choice across restarts; DrawMotionBlurRow below is what actually pushes it
+// into the engine, via the same console-queue path as the debug overlay.
+REXCVAR_DEFINE_STRING(motion_blur, "vanilla", "Graphics", "Motion blur intensity (off/mild/vanilla).");
+
+// Same guest console bridge the debug overlay uses (see the long comment on
+// g_pending_debug_command in camera_mouselook_hook.cpp): queues a line for
+// CConsole::ExecuteString on the guest thread.
+extern "C" void Darkness_QueueConsoleCommand(const char* text);
+
+// Keeps the debug overlay's Renderer-tab write-only shadow (see debug_overlay.cpp)
+// in sync whenever this file drives one of the same renderer cvars.
+extern "C" void Darkness_SetRendererCVarShadow(const char* name, float value);
 
 namespace thedarkness {
 
@@ -46,6 +64,9 @@ constexpr std::array kGameDefaults = {
     DefaultValue{"resolution", "720p"},
     DefaultValue{"resolution_scale", "1"},
     DefaultValue{"vulkan_device", "-1"},
+    DefaultValue{"vsync", "false"},
+    DefaultValue{"mnk_capture_mouse", "true"},
+    DefaultValue{"motion_blur", "vanilla"},
     // Dumps
     DefaultValue{"shader_dump_enabled", "false"},
     DefaultValue{"texture_dump_enabled", "false"},
@@ -71,9 +92,83 @@ constexpr std::array kGameDefaults = {
 // the generic DrawCvarWidget path, but are still listed here so the generic
 // Reset-All / restart-tracking loops cover them; GetFlagInfo/ResetToDefault
 // etc. no-op harmlessly for "vulkan_device" on a build without Vulkan.
-constexpr std::array<const char*, 7> kBasicCvarNames = {
-    "fullscreen",  "resolution",   "resolution_scale", "user_language",
-    "input_backend", "gpu_backend", "vulkan_device"};
+constexpr std::array<const char*, 10> kBasicCvarNames = {
+    "fullscreen",    "resolution",   "resolution_scale", "user_language",   "input_backend",
+    "gpu_backend",   "vulkan_device", "motion_blur",      "audio_mute",      "audio_volume"};
+
+// audio_volume is stored (and applied to samples) as linear amplitude, but
+// human loudness perception is roughly logarithmic -- a linear slider
+// (amplitude == percent/100) would spend most of its travel on
+// barely-perceptible changes near the top end and cram all the audible range
+// into the last few percent at the bottom. Map the displayed 0-100% through a
+// dB curve instead: -40dB at 0% (quiet enough to treat as silence below) up
+// to 0dB (full amplitude) at 100%, evenly spaced in dB rather than in
+// amplitude. Same curve ..\NocturneRecomp's settings.cpp uses.
+constexpr double kMinVolumeDb = -40.0;
+
+double VolumeAmplitudeFromPercent(int percent) {
+  if (percent <= 0)
+    return 0.0;
+  if (percent >= 100)
+    return 1.0;
+  double db = kMinVolumeDb * (100 - percent) / 100.0;
+  return std::pow(10.0, db / 20.0);
+}
+
+int VolumePercentFromAmplitude(double amplitude) {
+  if (amplitude <= 0.0)
+    return 0;
+  double db = 20.0 * std::log10(amplitude);
+  if (db <= kMinVolumeDb)
+    return 0;
+  return std::clamp(static_cast<int>(std::lround(100.0 - db * 100.0 / kMinVolumeDb)), 0, 100);
+}
+
+// xr_ppmbmaxradius values the "motion_blur" cvar's three settings map to.
+struct MotionBlurOption {
+  const char* id;  // motion_blur cvar value
+  const char* label;
+  float radius;
+};
+
+constexpr std::array kMotionBlurOptions = {
+    MotionBlurOption{"off", "Off", 0.0f},
+    MotionBlurOption{"mild", "Mild", 0.01f},
+    MotionBlurOption{"vanilla", "Vanilla", 0.04f},
+};
+
+// Queues the xr_ppmbmaxradius(...) call matching the persisted "motion_blur"
+// cvar. Called both from DrawMotionBlurRow (on user change) and, via
+// Darkness_ApplyMotionBlurSetting below, once per level/save load -- the
+// script-VM cvar it drives is not remembered by the engine across a
+// loadgame/newgame, so it has to be re-sent every time the world (re)spawns,
+// not just once at process startup.
+//
+// "Vanilla" sends the engine's own default radius, 0.04. That number is not a
+// guess: the render-settings constructor (sub_825DFF98) initializes the exact
+// field the xr_ppmbmaxradius handler (sub_825EC5E0) writes --
+// `*(float *)(settings + 1212) = 0.039999999` at 0x825E0118, offset 1212 =
+// 0x4BC. An earlier version of this used 1.0 here, copied from the debug
+// overlay's *placeholder* slider default, which is 25x the real value; that is
+// what made the image visibly blur the moment the pawn spawned and this
+// command landed. Sending the true default (rather than skipping the command
+// for "vanilla") also means switching Mild -> Vanilla actually restores stock
+// blur instead of leaving the cvar stuck at the Mild value.
+void QueueMotionBlurCommand() {
+  std::string current = FLAGS_motion_blur_storage_();
+
+  const MotionBlurOption* option = &kMotionBlurOptions[0];  // Off
+  for (const auto& candidate : kMotionBlurOptions) {
+    if (current == candidate.id) {
+      option = &candidate;
+      break;
+    }
+  }
+  REXLOG_INFO("[motion_blur] applying '{}' -> xr_ppmbmaxradius = {}", option->id, option->radius);
+  Darkness_QueueConsoleCommand(
+      (std::string("xr_ppmbmaxradius(") + std::to_string(option->radius) + ")").c_str());
+  Darkness_SetRendererCVarShadow("xr_ppmbmaxradius", option->radius);
+}
 
 struct LanguageOption {
   const char* id;  // stringified XLanguage value, as stored by the cvar
@@ -83,22 +178,22 @@ struct LanguageOption {
 // XLanguage IDs per the Xbox 360 kernel's user_language cvar (src/kernel/xam/
 // xam_user.cpp); note 10 is intentionally absent (not a valid XLanguage).
 constexpr std::array kLanguageOptions = {
-    LanguageOption{"1", "EN (English)"},
-    LanguageOption{"2", "JA (Japanese)"},
-    LanguageOption{"3", "DE (German)"},
-    LanguageOption{"4", "FR (French)"},
-    LanguageOption{"5", "ES (Spanish)"},
-    LanguageOption{"6", "IT (Italian)"},
-    LanguageOption{"7", "KO (Korean)"},
-    LanguageOption{"8", "ZH (Traditional Chinese)"},
-    LanguageOption{"9", "PT (Portuguese)"},
-    LanguageOption{"11", "PL (Polish)"},
-    LanguageOption{"12", "RU (Russian)"},
-    LanguageOption{"13", "SV (Swedish)"},
-    LanguageOption{"14", "TR (Turkish)"},
-    LanguageOption{"15", "NB (Norwegian)"},
-    LanguageOption{"16", "NL (Dutch)"},
-    LanguageOption{"17", "ZH (Simplified Chinese)"},
+    LanguageOption{"1", "English"},
+    // LanguageOption{"2", "JA (Japanese)"},
+    LanguageOption{"3", "German"},
+    LanguageOption{"4", "French"},
+    LanguageOption{"5", "Spanish"},
+    LanguageOption{"6", "Italian"},
+    // LanguageOption{"7", "KO (Korean)"},
+    // LanguageOption{"8", "ZH (Traditional Chinese)"},
+    // LanguageOption{"9", "PT (Portuguese)"},
+    // LanguageOption{"11", "PL (Polish)"},
+    // LanguageOption{"12", "RU (Russian)"},
+    // LanguageOption{"13", "SV (Swedish)"},
+    // LanguageOption{"14", "TR (Turkish)"},
+    // LanguageOption{"15", "NB (Norwegian)"},
+    // LanguageOption{"16", "NL (Dutch)"},
+    // LanguageOption{"17", "ZH (Simplified Chinese)"},
 };
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
@@ -175,6 +270,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawFullscreenRow();
     DrawResolutionRow();
     DrawRenderScaleRow();
+    DrawMotionBlurRow();
+    DrawAudioMuteRow();
+    DrawAudioVolumeRow();
     DrawLanguageRow();
     DrawInputBackendRow();
     DrawGpuBackendRow();
@@ -359,6 +457,80 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     if (changed) {
       rex::cvar::SetFlagByName("resolution_scale", std::to_string(valid_scales[idx]),
+                               /*persist=*/true);
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  // motion_blur is a curated cvar (see the REXCVAR_DEFINE_STRING at file
+  // scope) that only remembers the user's choice -- it has no effect on its
+  // own. Changing it queues the matching xr_ppmbmaxradius(...) script call
+  // (see the debug overlay's Renderer tab for the same mechanism, and
+  // QueueMotionBlurCommand above); Darkness_ApplyMotionBlurSetting re-sends
+  // that same call on every level/save load, since the script-VM cvar it
+  // drives is not remembered by the engine across a loadgame/newgame.
+  void DrawMotionBlurRow() {
+    std::string current = FLAGS_motion_blur_storage_();
+    int idx = 2;  // Vanilla
+    for (int i = 0; i < static_cast<int>(kMotionBlurOptions.size()); ++i) {
+      if (current == kMotionBlurOptions[i].id) {
+        idx = i;
+        break;
+      }
+    }
+
+    ImGui::TextUnformatted("Motion Blur");
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("motion_blur");
+    ImGui::SetNextItemWidth(160.0f);
+    bool changed =
+        ImGui::SliderInt("##v", &idx, 0, static_cast<int>(kMotionBlurOptions.size()) - 1,
+                         kMotionBlurOptions[idx].label);
+    if (changed) {
+      rex::cvar::SetFlagByName("motion_blur", kMotionBlurOptions[idx].id, /*persist=*/true);
+      QueueMotionBlurCommand();
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  void DrawAudioMuteRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("audio_mute");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted("Mute Audio");
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("audio_mute");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  // audio_volume is a Double cvar (0.0-1.0 linear amplitude); DrawCvarWidget's
+  // generic Double path is a plain InputDouble box, not a slider, so this
+  // draws its own row the same way DrawRenderScaleRow does for
+  // resolution_scale -- displaying and editing a perceptually-spaced
+  // percentage (see VolumeAmplitudeFromPercent) rather than the raw
+  // amplitude directly.
+  void DrawAudioVolumeRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("audio_volume");
+    if (!entry)
+      return;
+    const auto* mute_entry = rex::cvar::GetFlagInfo("audio_mute");
+    if (mute_entry && mute_entry->getter() == "true")
+      return;
+
+    int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
+
+    ImGui::TextUnformatted("Volume");
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::PushID("audio_volume");
+    bool changed = ImGui::SliderInt("##v", &percent, 0, 100, "%d%%");
+    if (changed) {
+      rex::cvar::SetFlagByName("audio_volume", std::to_string(VolumeAmplitudeFromPercent(percent)),
                                /*persist=*/true);
       SaveBasic();
     }
@@ -621,3 +793,12 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(
 }
 
 }  // namespace thedarkness
+
+// Called from PlayerLookVelocityHook (camera_mouselook_hook.cpp) whenever
+// the player pawn transitions from invalid to valid, i.e. on every
+// newgame/loadgame -- see the anonymous-namespace QueueMotionBlurCommand's
+// comment for why this needs to be re-sent rather than applied once at
+// process startup.
+extern "C" void Darkness_ApplyMotionBlurSetting() {
+  thedarkness::QueueMotionBlurCommand();
+}

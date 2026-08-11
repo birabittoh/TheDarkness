@@ -993,9 +993,20 @@ static void DrainConsoleQueue() {
 static uint32_t g_player_pawn = 0;
 extern "C" uint32_t Darkness_GetPlayerPawn() { return g_player_pawn; }
 
+// Re-applies script-VM cvars that the engine forgets across a newgame/
+// loadgame (see settings.cpp's QueueMotionBlurCommand comment).
+extern "C" void Darkness_ApplyMotionBlurSetting();
+
 // [[midasm_hook]] address = 0x823F8AF0, name = "PlayerLookVelocityHook",
 // registers = ["r3"], after_instruction = false
 void PlayerLookVelocityHook(PPCRegister& r3) {
+  // A 0 -> nonzero transition means a new world just spawned (newgame or
+  // loadgame): script-VM cvars like xr_ppmbmaxradius aren't persisted by the
+  // engine across that, so the curated settings this project layers on top
+  // need to be re-sent every time, not just once at process startup.
+  if (g_player_pawn == 0 && r3.u32 != 0) {
+    Darkness_ApplyMotionBlurSetting();
+  }
   g_player_pawn = r3.u32;
 
   // Drain any debug-overlay command queued from the UI thread (see the

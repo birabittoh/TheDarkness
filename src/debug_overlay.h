@@ -8,6 +8,10 @@
 
 namespace rex::ui {
 
+// Registers its own F6 keybind (see the ctor) to toggle visibility, since
+// unlike most overlays this one is a permanent dialog added via
+// ImGuiDrawer::AddDialog in OnCreateDialogs rather than being
+// constructed/destroyed on demand by a RegisterBind callback.
 class DarknessDebugOverlay : public ImGuiDialog {
  public:
   explicit DarknessDebugOverlay(ImGuiDrawer* imgui_drawer);
@@ -58,6 +62,7 @@ class DarknessDebugOverlay : public ImGuiDialog {
   bool refocus_input_ = false;
   char command_filter_[64] = {};
   char info_screen_text_[128] = "hello";
+  bool visible_ = false;
 };
 
 }  // namespace rex::ui
