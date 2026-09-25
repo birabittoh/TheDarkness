@@ -64,7 +64,10 @@ constexpr std::array kGameDefaults = {
     DefaultValue{"resolution", "720p"},
     DefaultValue{"resolution_scale", "1"},
     DefaultValue{"vulkan_device", "-1"},
-    DefaultValue{"vsync", "false"},
+    DefaultValue{"vsync", "true"},
+    DefaultValue{"vsync_follows_gpu", "true"},
+    DefaultValue{"vsync_max_pending_swaps", "2"},
+    DefaultValue{"vsync_gpu_stall_timeout_ms", "100"},
     DefaultValue{"mnk_capture_mouse", "true"},
     DefaultValue{"motion_blur", "vanilla"},
     // Dumps
